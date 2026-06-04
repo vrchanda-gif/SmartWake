@@ -11,6 +11,7 @@ from database import (
     delete_state,
     init_db,
     load_google_token,
+    load_oauth_code_verifier,
     load_oauth_state,
     save_google_token,
     save_oauth_state,
@@ -95,13 +96,16 @@ def _require_google_env() -> None:
         )
 
 
-def _create_oauth_flow() -> Flow:
+def _create_oauth_flow(
+    *,
+    code_verifier: str | None = None,
+    autogenerate_code_verifier: bool = False,
+) -> Flow:
     """
     Creates the Google OAuth web-server flow.
 
-    This replaces your old local/desktop InstalledAppFlow approach.
-    The important difference is that this flow uses the public Render
-    callback URL instead of localhost.
+    If PKCE is used, the code_verifier generated during /auth/google must be
+    restored during /oauth/callback before exchanging the code for tokens.
     """
     _require_google_env()
 
@@ -115,11 +119,17 @@ def _create_oauth_flow() -> Flow:
         }
     }
 
-    return Flow.from_client_config(
+    flow = Flow.from_client_config(
         client_config,
         scopes=SCOPES,
         redirect_uri=GOOGLE_REDIRECT_URI,
+        autogenerate_code_verifier=autogenerate_code_verifier,
     )
+
+    if code_verifier:
+        flow.code_verifier = code_verifier
+
+    return flow
 
 
 @app.get("/auth/status")
@@ -154,7 +164,7 @@ def auth_google():
     You visit this route in your browser once. It redirects you to Google.
     After you approve access, Google redirects back to /oauth/callback.
     """
-    flow = _create_oauth_flow()
+    flow = _create_oauth_flow(autogenerate_code_verifier=True)
 
     authorization_url, state = flow.authorization_url(
         access_type="offline",
@@ -162,7 +172,7 @@ def auth_google():
         include_granted_scopes="true",
     )
 
-    save_oauth_state(state)
+    save_oauth_state(state, flow.code_verifier)
 
     return RedirectResponse(authorization_url)
 
@@ -203,7 +213,9 @@ def oauth_callback(request: Request):
             detail="Missing OAuth authorization code.",
         )
 
-    flow = _create_oauth_flow()
+    code_verifier = load_oauth_code_verifier()
+
+    flow = _create_oauth_flow(code_verifier=code_verifier)
 
     try:
         flow.fetch_token(code=code)

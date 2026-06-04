@@ -167,15 +167,19 @@ def load_google_token() -> dict[str, Any] | None:
     return get_state("google_token")
 
 
-def save_oauth_state(state: str) -> None:
+def save_oauth_state(state: str, code_verifier: str | None = None) -> None:
     """
-    Save the temporary OAuth state value.
+    Save temporary OAuth state and PKCE code_verifier.
 
-    This value is generated when /auth/google starts. It is checked later
-    in /oauth/callback to make sure the callback belongs to the OAuth flow
-    that we started.
+    The state checks that Google's callback belongs to the flow we started.
+    The code_verifier is required if Google/OAuth library uses PKCE.
     """
-    set_state("oauth_state", {"state": state})
+    data: dict[str, Any] = {"state": state}
+
+    if code_verifier:
+        data["code_verifier"] = code_verifier
+
+    set_state("oauth_state", data)
 
 
 def load_oauth_state() -> str | None:
@@ -193,6 +197,23 @@ def load_oauth_state() -> str | None:
         return None
 
     return state
+
+
+def load_oauth_code_verifier() -> str | None:
+    """
+    Load the temporary PKCE code_verifier value.
+    """
+    data = get_state("oauth_state")
+
+    if not data:
+        return None
+
+    code_verifier = data.get("code_verifier")
+
+    if not isinstance(code_verifier, str):
+        return None
+
+    return code_verifier
 
 
 def save_worker_status(status: dict[str, Any]) -> None:
