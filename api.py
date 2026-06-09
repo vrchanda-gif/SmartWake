@@ -1,12 +1,19 @@
+#neded for hints in code verifier
 from __future__ import annotations
 
+#to read env variables from render
 import os
 from contextlib import asynccontextmanager
 
+#need redirect for google oauth flow
+#flow type is from oauth lib that manages login/authentication
+#used in creating the entire oauth path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from google_auth_oauthlib.flow import Flow
 
+#load all variables for google oauth stuff
+#need to get verify, get token, then store in database
 from database import (
     delete_state,
     init_db,
@@ -17,22 +24,19 @@ from database import (
     save_oauth_state,
 )
 
-
+#all variables needed for oauth process below
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
 
 GOOGLE_AUTH_URI = os.getenv(
     "GOOGLE_AUTH_URI",
     "https://accounts.google.com/o/oauth2/v2/auth",
 )
-
 GOOGLE_TOKEN_URI = os.getenv(
     "GOOGLE_TOKEN_URI",
     "https://oauth2.googleapis.com/token",
 )
-
 GOOGLE_HEALTH_SCOPE = os.getenv(
     "GOOGLE_HEALTH_SCOPE",
     "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly",
@@ -40,41 +44,25 @@ GOOGLE_HEALTH_SCOPE = os.getenv(
 
 SCOPES = [GOOGLE_HEALTH_SCOPE]
 
-
+#create database table for token values and other env stuff
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Runs once when the Render FastAPI service starts.
-
-    This makes sure the database table exists before OAuth routes try to
-    save or load token data.
-    """
     init_db()
     yield
 
-
+#create api
 app = FastAPI(lifespan=lifespan)
 
-
+#check for if api is running
 @app.get("/health")
 def health():
-    """
-    Simple Render health check endpoint.
-    """
     return {
         "status": "ok",
-        "service": "smartwake-api",
+        "service": "smartwake_api",
     }
 
-
+#sanity check for env variables being properly read
 def _require_google_env() -> None:
-    """
-    Makes OAuth errors easier to understand.
-
-    If one of these values is missing in Render's Environment tab,
-    /auth/google should fail with a clear message instead of a confusing
-    Google OAuth error.
-    """
     missing = []
 
     if not GOOGLE_CLIENT_ID:
@@ -89,25 +77,17 @@ def _require_google_env() -> None:
     if missing:
         raise HTTPException(
             status_code=500,
-            detail=(
-                "Missing Google OAuth environment variable(s): "
-                + ", ".join(missing)
-            ),
+            detail="Missing Google OAuth environment variable(s): " + ", ".join(missing),
         )
 
-
+#found in testing that we need to account for code_verifier
+#if we have one use it, if not ask for a PKCE code verifier from google oauth
 def _create_oauth_flow(
     *,
     code_verifier: str | None = None,
     autogenerate_code_verifier: bool = False,
 ) -> Flow:
-    """
-    Creates the Google OAuth web-server flow.
-
-    If PKCE is used, the code_verifier generated during /auth/google must be
-    restored during /oauth/callback before exchanging the code for tokens.
-    """
-    _require_google_env()
+    _require_google_env()   #check for all necessary env stuff before we try to run oauth flow
 
     client_config = {
         "web": {
@@ -119,6 +99,11 @@ def _create_oauth_flow(
         }
     }
 
+    #define flow
+    #get config variables
+    #define health scopes being requested
+    #define redirect for after user verified
+    #define whether we need to make a code verifier
     flow = Flow.from_client_config(
         client_config,
         scopes=SCOPES,
@@ -126,20 +111,16 @@ def _create_oauth_flow(
         autogenerate_code_verifier=autogenerate_code_verifier,
     )
 
+    #use saved code verifier during callback
     if code_verifier:
         flow.code_verifier = code_verifier
 
     return flow
 
-
+#displays if we have the google oauth tokens, is our success and error screen
+#keep simple just display connection status, reason if error and then values if success
 @app.get("/auth/status")
 def auth_status():
-    """
-    Shows whether Google OAuth has been completed.
-
-    Important: this does not return the actual token or refresh token.
-    It only returns safe status information.
-    """
     token = load_google_token()
 
     if not token:
@@ -151,21 +132,18 @@ def auth_status():
     return {
         "connected": True,
         "has_refresh_token": bool(token.get("refresh_token")),
-        "expiry": token.get("expiry"),
-        "scopes": token.get("scopes") or token.get("scope"),
+        "expiry": token.get("expiry"),  #shows when authentication token expires for reference
+        "scopes": token.get("scopes") or token.get("scope"),    #format might be scope or scopes so check both, normally scopes
     }
 
-
+#creates path for initial login and stuff
+#start oauth flow then ask google to run authorization 
+#gets code verifier then saved to database, state for debug stuff
 @app.get("/auth/google")
 def auth_google():
-    """
-    Starts the one-time Google OAuth setup.
-
-    You visit this route in your browser once. It redirects you to Google.
-    After you approve access, Google redirects back to /oauth/callback.
-    """
     flow = _create_oauth_flow(autogenerate_code_verifier=True)
 
+    #calls to the google for oauth, offline is refresh token and other two overify that we have access
     authorization_url, state = flow.authorization_url(
         access_type="offline",
         prompt="consent",
@@ -173,20 +151,16 @@ def auth_google():
     )
 
     save_oauth_state(state, flow.code_verifier)
+    return RedirectResponse(authorization_url)  #goes to google login for user
 
-    return RedirectResponse(authorization_url)
-
-
+#need callback stuff for google project and google health calls
+#after sign in we go here to take in data/make requests
+#check state for debug and make sure were authenticated
 @app.get("/oauth/callback")
 def oauth_callback(request: Request):
-    """
-    Handles Google's redirect after consent.
-
-    Google sends back a temporary code. This route exchanges that code for
-    token JSON, then stores the token JSON in Postgres through database.py.
-    """
     error = request.query_params.get("error")
 
+    #got 400 from testing app POST protocol, status code can help narrow down error source
     if error:
         raise HTTPException(
             status_code=400,
@@ -199,10 +173,7 @@ def oauth_callback(request: Request):
     if not expected_state or returned_state != expected_state:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "OAuth state mismatch. "
-                "Restart authorization from /auth/google."
-            ),
+            detail="OAuth state mismatch. Restart authorization from /auth/google.",
         )
 
     code = request.query_params.get("code")
@@ -213,23 +184,23 @@ def oauth_callback(request: Request):
             detail="Missing OAuth authorization code.",
         )
 
-    code_verifier = load_oauth_code_verifier()
-
+    code_verifier = load_oauth_code_verifier()  #get code verifier then rebuild oauth flow with the new code
     flow = _create_oauth_flow(code_verifier=code_verifier)
 
     try:
-        flow.fetch_token(code=code)
+        flow.fetch_token(code=code) #if we have code try to exchange for token, error means were generating code verifier wrong
     except Exception as exc:
         raise HTTPException(
             status_code=400,
             detail=f"Failed to exchange OAuth code for token: {exc}",
         ) from exc
 
-    credentials = flow.credentials
+    credentials = flow.credentials  #success means we can load tokens
 
+    #save credentials to database then delete state to clear up database
     save_google_token(credentials.to_json())
     delete_state("oauth_state")
-
+    #returns the expected formay of success to /status W W W W
     return {
         "message": "Google Health authorization complete.",
         "connected": True,
